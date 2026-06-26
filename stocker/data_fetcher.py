@@ -23,6 +23,7 @@ class PriceSnapshot:
     timestamp: datetime
     is_market_open: bool
     currency: str = "USD"
+    mode: str = "stock"   # "stock" | "crypto"
 
 
 class BadTickerError(ValueError):
@@ -33,9 +34,21 @@ class MarketClosedError(RuntimeError):
     pass
 
 
+def normalize_crypto_ticker(ticker: str) -> str:
+    """Ensure crypto tickers are in yfinance format (e.g. BTC -> BTC-USD)."""
+    ticker = ticker.upper()
+    if "-" not in ticker:
+        ticker = f"{ticker}-USD"
+    return ticker
+
+
 class DataFetcher:
-    def __init__(self, ticker: str, allow_extended: bool = True):
-        self.ticker = ticker.upper()
+    def __init__(self, ticker: str, mode: str = "stock", allow_extended: bool = True):
+        self.mode = mode.lower()
+        self.ticker = (
+            normalize_crypto_ticker(ticker) if self.mode == "crypto"
+            else ticker.upper()
+        )
         self.allow_extended = allow_extended
         self._yf_ticker: Optional[yf.Ticker] = None
         self._last_fetch: float = 0.0
@@ -51,14 +64,19 @@ class DataFetcher:
         self._throttle()
         price = self._get_price_with_retry()
         now = datetime.now(_ET)
+        # Crypto trades 24/7 — market is always open
+        open_ = True if self.mode == "crypto" else self._market_is_open(now)
         return PriceSnapshot(
             ticker=self.ticker,
             price=price,
             timestamp=now,
-            is_market_open=self._market_is_open(now),
+            is_market_open=open_,
+            mode=self.mode,
         )
 
     def is_market_open(self) -> bool:
+        if self.mode == "crypto":
+            return True
         return self._market_is_open(datetime.now(_ET))
 
     # ------------------------------------------------------------------

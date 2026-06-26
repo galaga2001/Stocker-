@@ -11,7 +11,7 @@ import pandas as pd
 import streamlit as st
 
 from stocker.config_manager import load_config
-from stocker.data_fetcher import BadTickerError, DataFetcher
+from stocker.data_fetcher import BadTickerError, DataFetcher, normalize_crypto_ticker
 from stocker.profit_calculator import compute_metrics
 from stocker.scenario_generator import generate_scenarios, update_trigger_status
 
@@ -25,26 +25,23 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ---------------------------------------------------------------------------
-# Custom CSS
-# ---------------------------------------------------------------------------
 st.markdown("""
 <style>
-    .status-triggered { color: #00c853; font-weight: 700; }
-    .status-close     { color: #ffd600; font-weight: 600; }
-    .status-waiting   { color: #9e9e9e; }
-    .gap-positive     { color: #00c853; }
-    .gap-negative     { color: #ef5350; }
-    .big-price        { font-size: 2.4rem; font-weight: 700; }
     div[data-testid="stMetricValue"] { font-size: 1.4rem; }
 </style>
 """, unsafe_allow_html=True)
 
+# ---------------------------------------------------------------------------
+# Mode constants
+# ---------------------------------------------------------------------------
+MODE_STOCK  = "📈  Stocks"
+MODE_CRYPTO = "₿  Crypto"
 
 # ---------------------------------------------------------------------------
 # Session state initialisation
 # ---------------------------------------------------------------------------
 _DEFAULTS: dict = {
+    "mode": MODE_STOCK,
     "monitoring": False,
     "fetcher": None,
     "scenarios": [],
@@ -53,89 +50,174 @@ _DEFAULTS: dict = {
     "notified_ids": set(),
     "last_fetch_time": 0.0,
     "error": None,
-    # remembered inputs
-    "ticker": "",
-    "shares": 10,
-    "cost_basis": 100.00,
-    "profit_target": 200.00,
+    # stock defaults
+    "stock_ticker": "",
+    "stock_shares": 10,
+    "stock_cost_basis": 100.00,
+    "stock_profit_target": 200.00,
+    "stock_scenario_step": 1,
+    # crypto defaults
+    "crypto_ticker": "",
+    "crypto_shares": 0.5,
+    "crypto_cost_basis": 50000.00,
+    "crypto_profit_target": 500.00,
+    "crypto_scenario_step": 0.1,
+    # shared
     "poll_interval": 10,
-    "scenario_step": 1,
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
-# Pre-fill from config file if one exists
+# Pre-fill stock fields from config file if one exists and not yet set
 _cfg = load_config()
-if _cfg.position.ticker and not st.session_state.ticker:
-    st.session_state.ticker      = _cfg.position.ticker
-    st.session_state.shares      = int(_cfg.position.shares)
-    st.session_state.cost_basis  = _cfg.position.cost_basis
-    st.session_state.profit_target = _cfg.position.profit_target
-    st.session_state.poll_interval = _cfg.poll_interval
+if _cfg.position.ticker and not st.session_state.stock_ticker:
+    st.session_state.stock_ticker        = _cfg.position.ticker
+    st.session_state.stock_shares        = int(_cfg.position.shares)
+    st.session_state.stock_cost_basis    = _cfg.position.cost_basis
+    st.session_state.stock_profit_target = _cfg.position.profit_target
+    st.session_state.poll_interval       = _cfg.poll_interval
 
 
 # ---------------------------------------------------------------------------
-# Sidebar — position inputs
+# Helpers
+# ---------------------------------------------------------------------------
+
+def stop_monitoring() -> None:
+    st.session_state.monitoring   = False
+    st.session_state.fetcher      = None
+    st.session_state.last_snap    = None
+    st.session_state.metrics      = None
+    st.session_state.scenarios    = []
+    st.session_state.error        = None
+
+
+def is_crypto() -> bool:
+    return st.session_state.mode == MODE_CRYPTO
+
+
+# ---------------------------------------------------------------------------
+# Sidebar
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.markdown("## 📈 Stocker")
-    st.caption("Live Stock Profit Monitor")
+    st.caption("Live Profit Monitor")
     st.divider()
 
-    locked = st.session_state.monitoring  # disable inputs while running
-
-    ticker = st.text_input(
-        "Ticker Symbol",
-        value=st.session_state.ticker,
-        placeholder="e.g. AAPL",
-        disabled=locked,
-    ).strip().upper()
-
-    shares = st.number_input(
-        "Shares Held",
-        min_value=1, max_value=100_000,
-        value=int(st.session_state.shares),
-        disabled=locked,
+    # --- Mode toggle ---
+    new_mode = st.radio(
+        "Asset type",
+        [MODE_STOCK, MODE_CRYPTO],
+        index=0 if st.session_state.mode == MODE_STOCK else 1,
+        horizontal=True,
+        disabled=st.session_state.monitoring,
     )
-
-    cost_basis = st.number_input(
-        "Average Cost Basis per Share ($)",
-        min_value=0.01,
-        value=float(st.session_state.cost_basis),
-        format="%.2f",
-        disabled=locked,
-    )
-
-    profit_target = st.number_input(
-        "Profit Target ($)",
-        min_value=0.01,
-        value=float(st.session_state.profit_target),
-        format="%.2f",
-        disabled=locked,
-    )
+    if new_mode != st.session_state.mode:
+        stop_monitoring()
+        st.session_state.mode = new_mode
+        st.rerun()
 
     st.divider()
-    st.caption("Settings")
+    locked = st.session_state.monitoring
 
+    # --- Inputs change based on mode ---
+    if not is_crypto():
+        ticker = st.text_input(
+            "Ticker Symbol",
+            value=st.session_state.stock_ticker,
+            placeholder="e.g. AAPL, TSLA, MSFT",
+            disabled=locked,
+        ).strip().upper()
+
+        shares = float(st.number_input(
+            "Shares Held",
+            min_value=1, max_value=1_000_000,
+            value=int(st.session_state.stock_shares),
+            step=1,
+            disabled=locked,
+        ))
+
+        cost_basis = st.number_input(
+            "Average Cost Basis per Share ($)",
+            min_value=0.01,
+            value=float(st.session_state.stock_cost_basis),
+            format="%.2f",
+            disabled=locked,
+        )
+
+        profit_target = st.number_input(
+            "Profit Target ($)",
+            min_value=0.01,
+            value=float(st.session_state.stock_profit_target),
+            format="%.2f",
+            disabled=locked,
+        )
+
+        scenario_step_options = [1, 2, 5, 10, 25, 50, 100]
+        scenario_step = float(st.select_slider(
+            "Scenario granularity (shares per row)",
+            options=scenario_step_options,
+            value=min(int(st.session_state.stock_scenario_step), max(scenario_step_options)),
+            disabled=locked,
+            help="Lower = more rows in the scenario table",
+        ))
+
+    else:  # Crypto mode
+        raw_ticker = st.text_input(
+            "Coin Symbol",
+            value=st.session_state.crypto_ticker or "",
+            placeholder="e.g. BTC, ETH, SOL",
+            disabled=locked,
+            help="Type the coin symbol — USD is added automatically",
+        ).strip().upper()
+        ticker = normalize_crypto_ticker(raw_ticker) if raw_ticker else ""
+
+        shares = st.number_input(
+            "Amount Held (coins)",
+            min_value=0.000001,
+            max_value=1_000_000.0,
+            value=float(st.session_state.crypto_shares),
+            format="%.6f",
+            step=0.001,
+            disabled=locked,
+        )
+
+        cost_basis = st.number_input(
+            "Average Cost Basis per Coin ($)",
+            min_value=0.000001,
+            value=float(st.session_state.crypto_cost_basis),
+            format="%.2f",
+            disabled=locked,
+        )
+
+        profit_target = st.number_input(
+            "Profit Target ($)",
+            min_value=0.01,
+            value=float(st.session_state.crypto_profit_target),
+            format="%.2f",
+            disabled=locked,
+        )
+
+        crypto_step_options = [0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5]
+        scenario_step = st.select_slider(
+            "Scenario granularity (coins per row)",
+            options=crypto_step_options,
+            value=st.session_state.crypto_scenario_step,
+            disabled=locked,
+            help="Lower = more rows in the scenario table",
+        )
+
+    st.divider()
     poll_interval = st.slider(
         "Price refresh (seconds)",
         min_value=5, max_value=120,
         value=st.session_state.poll_interval,
         disabled=locked,
     )
-
-    scenario_step = st.select_slider(
-        "Scenario granularity (shares per row)",
-        options=[1, 2, 5, 10, 25, 50],
-        value=st.session_state.scenario_step,
-        disabled=locked,
-        help="Lower = more rows in the scenario table",
-    )
-
     st.divider()
 
-    if not st.session_state.monitoring:
+    # --- Start / Stop ---
+    if not locked:
         start_clicked = st.button(
             "▶  Start Monitoring",
             type="primary",
@@ -144,9 +226,13 @@ with st.sidebar:
         )
         if start_clicked:
             st.session_state.error = None
+            mode_key = "crypto" if is_crypto() else "stock"
             with st.spinner(f"Connecting to {ticker}…"):
                 try:
-                    fetcher = DataFetcher(ticker)
+                    fetcher = DataFetcher(
+                        ticker,
+                        mode="crypto" if is_crypto() else "stock",
+                    )
                     scenarios = generate_scenarios(
                         total_shares=shares,
                         cost_basis=cost_basis,
@@ -157,17 +243,17 @@ with st.sidebar:
                     if not scenarios:
                         st.session_state.error = (
                             "No valid scenarios found. "
-                            "Make sure your profit target is achievable with your share count."
+                            "Check that your profit target is achievable with your position."
                         )
                     else:
-                        # Persist inputs to session state
+                        # Persist mode-specific inputs
+                        st.session_state[f"{mode_key}_ticker"]        = ticker
+                        st.session_state[f"{mode_key}_shares"]        = shares
+                        st.session_state[f"{mode_key}_cost_basis"]    = cost_basis
+                        st.session_state[f"{mode_key}_profit_target"] = profit_target
+                        st.session_state[f"{mode_key}_scenario_step"] = scenario_step
+                        st.session_state.poll_interval = poll_interval
                         st.session_state.update(
-                            ticker=ticker,
-                            shares=shares,
-                            cost_basis=cost_basis,
-                            profit_target=profit_target,
-                            poll_interval=poll_interval,
-                            scenario_step=scenario_step,
                             fetcher=fetcher,
                             scenarios=scenarios,
                             notified_ids=set(),
@@ -175,14 +261,17 @@ with st.sidebar:
                             last_snap=None,
                             metrics=None,
                             monitoring=True,
+                            # stash current position for display
+                            _active_shares=shares,
+                            _active_cost_basis=cost_basis,
+                            _active_profit_target=profit_target,
                         )
                         st.rerun()
                 except BadTickerError as exc:
                     st.session_state.error = str(exc)
     else:
         if st.button("⏹  Stop Monitoring", use_container_width=True):
-            st.session_state.monitoring = False
-            st.session_state.fetcher = None
+            stop_monitoring()
             st.rerun()
 
     if st.session_state.error:
@@ -190,47 +279,53 @@ with st.sidebar:
 
 
 # ---------------------------------------------------------------------------
-# Main area — welcome screen or live dashboard
+# Main area
 # ---------------------------------------------------------------------------
 if not st.session_state.monitoring:
-    st.markdown("# 📈 Stocker")
+    icon  = "₿" if is_crypto() else "📈"
+    label = "Crypto" if is_crypto() else "Stocks"
+    st.markdown(f"# {icon} Stocker — {label}")
     st.markdown(
-        "Enter your position details in the **sidebar** and click "
+        "Fill in your position in the **sidebar** and click "
         "**▶ Start Monitoring** to begin."
     )
     st.divider()
     col1, col2, col3 = st.columns(3)
-    col1.info("**Step 1**\nEnter your ticker symbol, number of shares, and what you paid per share.")
+    unit = "coins" if is_crypto() else "shares"
+    col1.info(f"**Step 1**\nEnter the ticker symbol, how many {unit} you hold, and what you paid per {unit[:-1]}.")
     col2.info("**Step 2**\nSet the exact dollar profit you want to net from a sell.")
-    col3.info("**Step 3**\nHit Start — the dashboard shows every way to hit your target and alerts you when the price is reached.")
+    col3.info("**Step 3**\nHit Start — every way to hit your target is shown, and you get an alert the moment a price is reached.")
 
 else:
     # -----------------------------------------------------------------------
     # Fetch price when interval has elapsed
     # -----------------------------------------------------------------------
     elapsed = time.time() - st.session_state.last_fetch_time
-    if elapsed >= st.session_state.poll_interval or st.session_state.last_snap is None:
+    needs_fetch = elapsed >= st.session_state.poll_interval or st.session_state.last_snap is None
+
+    if needs_fetch:
         try:
             snap = st.session_state.fetcher.fetch()
             metrics = compute_metrics(
-                st.session_state.cost_basis,
+                st.session_state._active_cost_basis,
                 snap.price,
-                st.session_state.shares,
+                st.session_state._active_shares,
             )
-            st.session_state.last_snap = snap
-            st.session_state.metrics = metrics
+            st.session_state.last_snap       = snap
+            st.session_state.metrics         = metrics
             st.session_state.last_fetch_time = time.time()
 
             ts = snap.timestamp.strftime("%H:%M:%S")
             update_trigger_status(st.session_state.scenarios, snap.price, ts)
 
-            # In-app toast for newly triggered scenarios
             for s in st.session_state.scenarios:
                 sid = id(s)
                 if s.triggered and sid not in st.session_state.notified_ids:
                     st.session_state.notified_ids.add(sid)
+                    unit = "coins" if is_crypto() else "shares"
+                    amt  = f"{s.shares_to_sell:.4f}" if is_crypto() else f"{s.shares_to_sell:.0f}"
                     st.toast(
-                        f"Target hit! Sell {s.shares_to_sell} shares @ ${s.required_price:.2f}",
+                        f"Target hit! Sell {amt} {unit} @ ${s.required_price:,.2f}",
                         icon="🔔",
                     )
         except Exception as exc:
@@ -239,73 +334,77 @@ else:
     snap    = st.session_state.last_snap
     metrics = st.session_state.metrics
 
-    # -----------------------------------------------------------------------
-    # Render dashboard
-    # -----------------------------------------------------------------------
     if snap is None or metrics is None:
         st.info("Fetching first price…")
     else:
-        mkt_badge = "🟢 Market Open" if snap.is_market_open else "🔴 Market Closed"
         remaining = max(0, st.session_state.poll_interval - (time.time() - st.session_state.last_fetch_time))
 
-        # Header row
-        head_left, head_right = st.columns([3, 1])
-        with head_left:
+        # --- Header ---
+        if is_crypto():
+            mkt_badge = "🟣 24 / 7"
+        else:
+            mkt_badge = "🟢 Market Open" if snap.is_market_open else "🔴 Market Closed"
+
+        head_l, head_r = st.columns([3, 1])
+        with head_l:
             st.markdown(f"## {snap.ticker} &nbsp;&nbsp; {mkt_badge}")
-        with head_right:
+        with head_r:
             st.caption(f"Last update: {snap.timestamp.strftime('%H:%M:%S %Z')}")
             st.caption(f"Next refresh in **{int(remaining)}s**")
 
-        # Key metrics
+        # --- Metric cards ---
+        price_fmt = f"${snap.price:,.2f}" if snap.price >= 1 else f"${snap.price:.6f}"
         pnl_color = "normal" if metrics.unrealized_pnl >= 0 else "inverse"
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Current Price",   f"${snap.price:,.2f}")
-        c2.metric("Cost Basis",      f"${metrics.cost_basis:,.2f}")
+        c1.metric("Current Price",  price_fmt)
+        c2.metric("Cost Basis",     f"${metrics.cost_basis:,.2f}")
         c3.metric(
             "Unrealized P&L",
             f"${metrics.unrealized_pnl:+,.2f}",
             delta=f"{metrics.unrealized_pnl_pct:+.2f}%",
             delta_color=pnl_color,
         )
-        c4.metric("Profit Target",   f"${st.session_state.profit_target:,.2f}")
+        c4.metric("Profit Target",  f"${st.session_state._active_profit_target:,.2f}")
 
         st.divider()
 
-        # -----------------------------------------------------------------------
-        # Triggered alerts banner
-        # -----------------------------------------------------------------------
+        # --- Triggered alerts ---
         triggered = [s for s in st.session_state.scenarios if s.triggered]
         if triggered:
             st.markdown("### 🔔 Active Alerts")
+            unit = "coins" if is_crypto() else "share(s)"
             for s in triggered:
+                amt = f"{s.shares_to_sell:.4f}" if is_crypto() else f"{s.shares_to_sell:.0f}"
                 st.success(
-                    f"**Sell {s.shares_to_sell} share(s) @ ${s.required_price:.2f}** — "
+                    f"**Sell {amt} {unit} @ ${s.required_price:,.2f}** — "
                     f"price target crossed at **{s.trigger_time}** — "
                     f"nets you **${s.profit_target:,.2f}**"
                 )
             st.divider()
 
-        # -----------------------------------------------------------------------
-        # Scenario table
-        # -----------------------------------------------------------------------
+        # --- Scenario table ---
+        unit_label = "Coins to Sell" if is_crypto() else "Shares to Sell"
         st.markdown("### Sell Scenarios")
         st.caption(
             "Each row shows the exact price you need to sell at to net your profit target "
-            "for a given number of shares."
+            f"for a given number of {('coins' if is_crypto() else 'shares')}."
         )
 
         rows = []
         for s in st.session_state.scenarios:
             gap = snap.price - s.required_price
+            # "Almost there" threshold: within 0.2% of required price (works for both BTC and penny stocks)
+            close_threshold = s.required_price * 0.002
             if s.triggered:
                 status = "✅  TRIGGERED"
-            elif gap >= -0.10:
+            elif gap >= -close_threshold:
                 status = "🟡  Almost there"
             else:
                 status = "⏳  Waiting"
 
+            amt = f"{s.shares_to_sell:.4f}" if is_crypto() else f"{s.shares_to_sell:.0f}"
             rows.append({
-                "Shares to Sell": s.shares_to_sell,
+                unit_label: amt,
                 "Sell at This Price": s.required_price,
                 "Current Price": snap.price,
                 "Gap to Target": gap,
@@ -314,20 +413,19 @@ else:
             })
 
         df = pd.DataFrame(rows)
+        price_fmt_str = "$%.4f" if snap.price < 1 else "$%.2f"
 
         st.dataframe(
             df,
             use_container_width=True,
             hide_index=True,
             column_config={
-                "Shares to Sell": st.column_config.NumberColumn(
-                    "Shares to Sell", format="%d", width="medium"
-                ),
+                unit_label: st.column_config.TextColumn(unit_label, width="medium"),
                 "Sell at This Price": st.column_config.NumberColumn(
-                    "Sell at This Price", format="$%.2f", width="medium"
+                    "Sell at This Price", format=price_fmt_str, width="medium"
                 ),
                 "Current Price": st.column_config.NumberColumn(
-                    "Current Price", format="$%.2f", width="medium"
+                    "Current Price", format=price_fmt_str, width="medium"
                 ),
                 "Gap to Target": st.column_config.NumberColumn(
                     "Gap to Target", format="$%+.2f", width="medium"
@@ -338,12 +436,12 @@ else:
         )
 
         st.caption(
-            "💡 Tip: rows with a positive Gap are already above your sell target price. "
-            "A green ✅ means a notification has fired for that row."
+            "💡 Tip: a positive Gap means the current price already exceeds that row's sell target. "
+            "✅ means an alert has fired for that row."
         )
 
     # -----------------------------------------------------------------------
-    # Auto-refresh every second (only fetches API data on poll_interval)
+    # Auto-refresh every second
     # -----------------------------------------------------------------------
     time.sleep(1)
     st.rerun()
