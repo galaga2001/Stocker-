@@ -64,6 +64,7 @@ _DEFAULTS: dict = {
     "crypto_scenario_step": 0.1,
     # shared
     "poll_interval": 10,
+    "notifications_on": True,
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
@@ -214,6 +215,11 @@ with st.sidebar:
         value=st.session_state.poll_interval,
         disabled=locked,
     )
+    notifications_on = st.toggle(
+        "Notifications",
+        value=st.session_state.notifications_on,
+    )
+    st.session_state.notifications_on = notifications_on
     st.divider()
 
     # --- Start / Stop ---
@@ -322,12 +328,13 @@ else:
                 sid = id(s)
                 if s.triggered and sid not in st.session_state.notified_ids:
                     st.session_state.notified_ids.add(sid)
-                    unit = "coins" if is_crypto() else "shares"
-                    amt  = f"{s.shares_to_sell:.4f}" if is_crypto() else f"{s.shares_to_sell:.0f}"
-                    st.toast(
-                        f"Target hit! Sell {amt} {unit} @ ${s.required_price:,.2f}",
-                        icon="🔔",
-                    )
+                    if st.session_state.notifications_on:
+                        unit = "coins" if is_crypto() else "shares"
+                        amt  = f"{s.shares_to_sell:.4f}" if is_crypto() else f"{s.shares_to_sell:.0f}"
+                        st.toast(
+                            f"Target hit! Sell {amt} {unit} @ ${s.required_price:,.2f}",
+                            icon="🔔",
+                        )
         except Exception as exc:
             st.warning(f"Price fetch error — will retry: {exc}")
 
