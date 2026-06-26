@@ -5,12 +5,13 @@ Launch with:  streamlit run app.py
 
 from __future__ import annotations
 
+import os
 import time
 
 import pandas as pd
 import streamlit as st
 
-from stocker.config_manager import load_config
+from stocker.config_manager import AppConfig, AlpacaConfig, load_config, save_config
 from stocker.data_fetcher import BadTickerError, DataFetcher, normalize_crypto_ticker
 from stocker.positions_manager import add_or_update, delete, load_positions, save_positions
 from stocker.profit_calculator import compute_metrics
@@ -69,24 +70,26 @@ _DEFAULTS: dict = {
     # saved positions
     "saved_positions": [],
     "selected_position": "— New position —",
+    # Alpaca API keys
+    "alpaca_key": "",
+    "alpaca_secret": "",
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
-# Load saved positions from disk once per session
+# Load saved positions and API keys from disk once per session
 if "positions_loaded" not in st.session_state:
     st.session_state.saved_positions = load_positions()
     st.session_state.positions_loaded = True
 
-# Pre-fill stock fields from config file if one exists and not yet set
-_cfg = load_config()
-if _cfg.position.ticker and not st.session_state.stock_ticker:
-    st.session_state.stock_ticker        = _cfg.position.ticker
-    st.session_state.stock_shares        = int(_cfg.position.shares)
-    st.session_state.stock_cost_basis    = _cfg.position.cost_basis
-    st.session_state.stock_profit_target = _cfg.position.profit_target
-    st.session_state.poll_interval       = _cfg.poll_interval
+if "keys_loaded" not in st.session_state:
+    # Environment variables take priority, then config file
+    _cfg = load_config()
+    st.session_state.alpaca_key    = os.environ.get("ALPACA_API_KEY",    _cfg.alpaca.api_key)
+    st.session_state.alpaca_secret = os.environ.get("ALPACA_API_SECRET", _cfg.alpaca.api_secret)
+    st.session_state.keys_loaded   = True
+
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +264,46 @@ with st.sidebar:
         value=st.session_state.notifications_on,
     )
     st.session_state.notifications_on = notifications_on
+
+    st.divider()
+
+    # --- Alpaca API keys (stocks only — crypto needs no key) ---
+    keys_set = bool(st.session_state.alpaca_key and st.session_state.alpaca_secret)
+    with st.expander(
+        "🔑 Alpaca API Keys" + (" ✓" if keys_set else " — required for stocks"),
+        expanded=not keys_set and not is_crypto(),
+    ):
+        st.caption(
+            "Free keys from [alpaca.markets](https://alpaca.markets) — "
+            "paper trading account works fine."
+        )
+        api_key = st.text_input(
+            "API Key ID",
+            value=st.session_state.alpaca_key,
+            type="password",
+            disabled=locked,
+            placeholder="Paste your Alpaca API Key ID",
+        )
+        api_secret = st.text_input(
+            "API Secret Key",
+            value=st.session_state.alpaca_secret,
+            type="password",
+            disabled=locked,
+            placeholder="Paste your Alpaca Secret Key",
+        )
+        if st.button("💾 Save keys", disabled=not (api_key and api_secret)):
+            st.session_state.alpaca_key    = api_key
+            st.session_state.alpaca_secret = api_secret
+            cfg = load_config()
+            cfg.alpaca.api_key    = api_key
+            cfg.alpaca.api_secret = api_secret
+            save_config(cfg)
+            st.toast("API keys saved!", icon="🔑")
+            st.rerun()
+
+        st.session_state.alpaca_key    = api_key
+        st.session_state.alpaca_secret = api_secret
+
     st.divider()
 
     # --- Save / Delete ---
@@ -318,6 +361,8 @@ with st.sidebar:
                     fetcher = DataFetcher(
                         ticker,
                         mode="crypto" if is_crypto() else "stock",
+                        api_key=st.session_state.alpaca_key,
+                        api_secret=st.session_state.alpaca_secret,
                     )
                     scenarios = generate_scenarios(
                         total_shares=shares,

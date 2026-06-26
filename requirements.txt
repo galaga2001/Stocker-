@@ -1,4 +1,4 @@
-yfinance>=0.2.36
+alpaca-py>=0.20.0
 rich>=13.7.0
 plyer>=2.1.0
 pyyaml>=6.0.1

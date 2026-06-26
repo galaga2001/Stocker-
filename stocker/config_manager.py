@@ -38,9 +38,16 @@ class PositionConfig:
 
 
 @dataclass
+class AlpacaConfig:
+    api_key: str = ""
+    api_secret: str = ""
+
+
+@dataclass
 class AppConfig:
     position: PositionConfig = field(default_factory=PositionConfig)
     notification: NotificationConfig = field(default_factory=NotificationConfig)
+    alpaca: AlpacaConfig = field(default_factory=AlpacaConfig)
     poll_interval: int = 10         # seconds between price checks
     scenario_step: int = 1          # share increment between scenarios
 
@@ -54,11 +61,13 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
     with open(target) as fh:
         raw = yaml.safe_load(fh) or {}
 
-    position = PositionConfig(**raw.get("position", {}))
+    position     = PositionConfig(**raw.get("position", {}))
     notification = NotificationConfig(**raw.get("notification", {}))
+    alpaca       = AlpacaConfig(**raw.get("alpaca", {}))
     return AppConfig(
         position=position,
         notification=notification,
+        alpaca=alpaca,
         poll_interval=raw.get("poll_interval", 10),
         scenario_step=raw.get("scenario_step", 1),
     )
@@ -71,6 +80,7 @@ def save_config(cfg: AppConfig, path: Optional[Path] = None) -> None:
     data = {
         "position": asdict(cfg.position),
         "notification": asdict(cfg.notification),
+        "alpaca": asdict(cfg.alpaca),
         "poll_interval": cfg.poll_interval,
         "scenario_step": cfg.scenario_step,
     }

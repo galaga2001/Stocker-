@@ -1,4 +1,4 @@
-"""Data fetcher — live price retrieval with rate-limit and market-hours handling."""
+"""Data fetcher — live price retrieval via Alpaca Markets API."""
 
 from __future__ import annotations
 
@@ -8,10 +8,8 @@ from datetime import datetime, time as dtime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-import yfinance as yf
-
 # NYSE/NASDAQ regular session in Eastern time
-_MARKET_OPEN = dtime(9, 30)
+_MARKET_OPEN  = dtime(9, 30)
 _MARKET_CLOSE = dtime(16, 0)
 _ET = ZoneInfo("America/New_York")
 
@@ -23,7 +21,7 @@ class PriceSnapshot:
     timestamp: datetime
     is_market_open: bool
     currency: str = "USD"
-    mode: str = "stock"   # "stock" | "crypto"
+    mode: str = "stock"
 
 
 class BadTickerError(ValueError):
@@ -35,24 +33,44 @@ class MarketClosedError(RuntimeError):
 
 
 def normalize_crypto_ticker(ticker: str) -> str:
-    """Ensure crypto tickers are in yfinance format (e.g. BTC -> BTC-USD)."""
+    """Return display-format crypto ticker (BTC -> BTC-USD, BTC/USD -> BTC-USD)."""
     ticker = ticker.upper()
+    if "/" in ticker:
+        return ticker.replace("/", "-")
     if "-" not in ticker:
-        ticker = f"{ticker}-USD"
+        return f"{ticker}-USD"
     return ticker
 
 
+def _alpaca_crypto_symbol(ticker: str) -> str:
+    """Convert display ticker (BTC-USD) to Alpaca format (BTC/USD)."""
+    ticker = ticker.upper()
+    if "/" in ticker:
+        return ticker
+    if "-" in ticker:
+        base, quote = ticker.split("-", 1)
+        return f"{base}/{quote}"
+    return f"{ticker}/USD"
+
+
 class DataFetcher:
-    def __init__(self, ticker: str, mode: str = "stock", allow_extended: bool = True):
-        self.mode = mode.lower()
-        self.ticker = (
+    def __init__(
+        self,
+        ticker: str,
+        mode: str = "stock",
+        api_key: str = "",
+        api_secret: str = "",
+    ):
+        self.mode       = mode.lower()
+        self.ticker     = (
             normalize_crypto_ticker(ticker) if self.mode == "crypto"
             else ticker.upper()
         )
-        self.allow_extended = allow_extended
-        self._yf_ticker: Optional[yf.Ticker] = None
+        self._api_key    = api_key
+        self._api_secret = api_secret
         self._last_fetch: float = 0.0
-        self._min_interval: float = 1.0   # never hit API faster than 1 s
+        self._min_interval: float = 1.0
+        self._client     = self._build_client()
         self._validate()
 
     # ------------------------------------------------------------------
@@ -60,11 +78,9 @@ class DataFetcher:
     # ------------------------------------------------------------------
 
     def fetch(self) -> PriceSnapshot:
-        """Return the latest price snapshot, respecting rate limits."""
         self._throttle()
         price = self._get_price_with_retry()
-        now = datetime.now(_ET)
-        # Crypto trades 24/7 — market is always open
+        now   = datetime.now(_ET)
         open_ = True if self.mode == "crypto" else self._market_is_open(now)
         return PriceSnapshot(
             ticker=self.ticker,
@@ -83,20 +99,22 @@ class DataFetcher:
     # Private
     # ------------------------------------------------------------------
 
+    def _build_client(self):
+        if self.mode == "crypto":
+            from alpaca.data.historical import CryptoHistoricalDataClient
+            # Crypto data is free and requires no auth on Alpaca
+            return CryptoHistoricalDataClient()
+        else:
+            from alpaca.data.historical import StockHistoricalDataClient
+            return StockHistoricalDataClient(self._api_key, self._api_secret)
+
     def _validate(self) -> None:
         try:
-            t = yf.Ticker(self.ticker)
-            info = t.info
-            if not info or info.get("regularMarketPrice") is None and info.get("currentPrice") is None:
-                # Fast-path check failed; try a tiny history pull
-                hist = t.history(period="1d")
-                if hist.empty:
-                    raise BadTickerError(f"No data found for ticker '{self.ticker}'")
+            self._extract_price()
         except Exception as exc:
-            if isinstance(exc, BadTickerError):
-                raise
-            raise BadTickerError(f"Could not validate ticker '{self.ticker}': {exc}") from exc
-        self._yf_ticker = t
+            raise BadTickerError(
+                f"Could not fetch price for '{self.ticker}': {exc}"
+            ) from exc
 
     def _get_price_with_retry(self, retries: int = 4) -> float:
         delay = 2.0
@@ -109,23 +127,33 @@ class DataFetcher:
                 if attempt < retries - 1:
                     time.sleep(delay)
                     delay *= 2
-        raise RuntimeError(f"Failed to fetch price after {retries} attempts: {last_exc}") from last_exc
+        raise RuntimeError(
+            f"Failed to fetch price after {retries} attempts: {last_exc}"
+        ) from last_exc
 
     def _extract_price(self) -> float:
-        # Create a fresh Ticker on every call — reusing one instance caches .info
-        # and returns a stale price on subsequent fetches.
-        t = yf.Ticker(self.ticker)
-        try:
-            price = t.fast_info.last_price
-            if price and float(price) > 0:
-                return float(price)
-        except Exception:
-            pass
-        # Fallback: latest 1-minute bar
-        hist = t.history(period="1d", interval="1m")
-        if not hist.empty:
-            return float(hist["Close"].iloc[-1])
-        raise RuntimeError("No usable price field returned by yfinance")
+        if self.mode == "crypto":
+            return self._fetch_crypto()
+        return self._fetch_stock()
+
+    def _fetch_stock(self) -> float:
+        from alpaca.data.requests import StockLatestTradeRequest
+        req    = StockLatestTradeRequest(symbol_or_symbols=self.ticker)
+        trades = self._client.get_stock_latest_trade(req)
+        trade  = trades.get(self.ticker)
+        if not trade or not trade.price:
+            raise RuntimeError(f"No trade data returned for {self.ticker}")
+        return float(trade.price)
+
+    def _fetch_crypto(self) -> float:
+        from alpaca.data.requests import CryptoLatestTradeRequest
+        symbol = _alpaca_crypto_symbol(self.ticker)
+        req    = CryptoLatestTradeRequest(symbol_or_symbols=symbol)
+        trades = self._client.get_crypto_latest_trade(req)
+        trade  = trades.get(symbol)
+        if not trade or not trade.price:
+            raise RuntimeError(f"No trade data returned for {symbol}")
+        return float(trade.price)
 
     def _throttle(self) -> None:
         elapsed = time.monotonic() - self._last_fetch
@@ -135,6 +163,6 @@ class DataFetcher:
 
     @staticmethod
     def _market_is_open(now: datetime) -> bool:
-        if now.weekday() >= 5:   # Saturday / Sunday
+        if now.weekday() >= 5:
             return False
         return _MARKET_OPEN <= now.time() <= _MARKET_CLOSE
