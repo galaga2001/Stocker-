@@ -112,15 +112,17 @@ class DataFetcher:
         raise RuntimeError(f"Failed to fetch price after {retries} attempts: {last_exc}") from last_exc
 
     def _extract_price(self) -> float:
-        assert self._yf_ticker is not None
-        info = self._yf_ticker.info
-        # Prefer real-time fields, fall back gracefully
-        for key in ("currentPrice", "regularMarketPrice", "ask", "bid", "previousClose"):
-            val = info.get(key)
-            if val and isinstance(val, (int, float)) and val > 0:
-                return float(val)
-        # Last resort: latest close from 1-minute history
-        hist = self._yf_ticker.history(period="1d", interval="1m")
+        # Create a fresh Ticker on every call — reusing one instance caches .info
+        # and returns a stale price on subsequent fetches.
+        t = yf.Ticker(self.ticker)
+        try:
+            price = t.fast_info.last_price
+            if price and float(price) > 0:
+                return float(price)
+        except Exception:
+            pass
+        # Fallback: latest 1-minute bar
+        hist = t.history(period="1d", interval="1m")
         if not hist.empty:
             return float(hist["Close"].iloc[-1])
         raise RuntimeError("No usable price field returned by yfinance")
