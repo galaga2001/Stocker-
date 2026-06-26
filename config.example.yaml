@@ -1,0 +1,30 @@
+# Stocker example config — copy to ~/.stocker/config.yaml and fill in your values.
+# All fields are optional; missing values are prompted at startup.
+
+position:
+  ticker: "AAPL"
+  shares: 50
+  cost_basis: 145.00      # average price paid per share
+  profit_target: 500.00   # dollar amount you want to net
+
+# How often (in seconds) to poll for a new price
+poll_interval: 10
+
+# Share increment between generated scenarios (1 = every share count shown)
+scenario_step: 1
+
+notification:
+  method: "desktop"   # desktop | email | sms | none
+
+  # --- Email (only needed if method = "email") ---
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587
+  smtp_user: ""
+  smtp_password: ""
+  email_to: ""
+
+  # --- Twilio SMS (only needed if method = "sms") ---
+  twilio_sid: ""
+  twilio_token: ""
+  twilio_from: ""   # your Twilio number, e.g. "+15551234567"
+  twilio_to: ""     # your personal number
