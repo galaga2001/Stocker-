@@ -12,6 +12,7 @@ import streamlit as st
 
 from stocker.config_manager import load_config
 from stocker.data_fetcher import BadTickerError, DataFetcher, normalize_crypto_ticker
+from stocker.positions_manager import add_or_update, delete, load_positions, save_positions
 from stocker.profit_calculator import compute_metrics
 from stocker.scenario_generator import generate_scenarios, update_trigger_status
 
@@ -65,10 +66,18 @@ _DEFAULTS: dict = {
     # shared
     "poll_interval": 10,
     "notifications_on": True,
+    # saved positions
+    "saved_positions": [],
+    "selected_position": "— New position —",
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
+
+# Load saved positions from disk once per session
+if "positions_loaded" not in st.session_state:
+    st.session_state.saved_positions = load_positions()
+    st.session_state.positions_loaded = True
 
 # Pre-fill stock fields from config file if one exists and not yet set
 _cfg = load_config()
@@ -116,6 +125,38 @@ with st.sidebar:
     if new_mode != st.session_state.mode:
         stop_monitoring()
         st.session_state.mode = new_mode
+        st.rerun()
+
+    st.divider()
+
+    # --- Saved positions dropdown ---
+    NEW_POSITION = "— New position —"
+    position_names = [NEW_POSITION] + [p["name"] for p in st.session_state.saved_positions]
+    current_selection = (
+        st.session_state.selected_position
+        if st.session_state.selected_position in position_names
+        else NEW_POSITION
+    )
+
+    selected = st.selectbox(
+        "Saved Positions",
+        options=position_names,
+        index=position_names.index(current_selection),
+        disabled=st.session_state.monitoring,
+    )
+
+    # When user picks a different position, auto-fill all fields and rerun
+    if selected != st.session_state.selected_position:
+        st.session_state.selected_position = selected
+        if selected != NEW_POSITION:
+            pos = next(p for p in st.session_state.saved_positions if p["name"] == selected)
+            mode_key = pos.get("mode", "stock")
+            st.session_state.mode = MODE_STOCK if mode_key == "stock" else MODE_CRYPTO
+            st.session_state[f"{mode_key}_ticker"]        = pos["ticker"]
+            st.session_state[f"{mode_key}_shares"]        = pos["shares"]
+            st.session_state[f"{mode_key}_cost_basis"]    = pos["cost_basis"]
+            st.session_state[f"{mode_key}_profit_target"] = pos["profit_target"]
+            st.session_state[f"{mode_key}_scenario_step"] = pos.get("scenario_step", 1)
         st.rerun()
 
     st.divider()
@@ -220,6 +261,45 @@ with st.sidebar:
         value=st.session_state.notifications_on,
     )
     st.session_state.notifications_on = notifications_on
+    st.divider()
+
+    # --- Save / Delete ---
+    if not locked:
+        unit = "coins" if is_crypto() else "shares"
+        default_name = f"{ticker} — {shares} {unit} @ ${cost_basis:,.2f}" if ticker else ""
+        save_name = st.text_input(
+            "Save as",
+            value=st.session_state.selected_position
+                  if st.session_state.selected_position != "— New position —"
+                  else default_name,
+            placeholder="Give this position a name",
+        )
+        save_col, del_col = st.columns(2)
+        if save_col.button("💾 Save", use_container_width=True, disabled=not save_name):
+            new_pos = {
+                "name": save_name,
+                "mode": "crypto" if is_crypto() else "stock",
+                "ticker": ticker,
+                "shares": shares,
+                "cost_basis": cost_basis,
+                "profit_target": profit_target,
+                "scenario_step": scenario_step,
+            }
+            updated = add_or_update(st.session_state.saved_positions, new_pos)
+            save_positions(updated)
+            st.session_state.saved_positions = updated
+            st.session_state.selected_position = save_name
+            st.toast(f'Saved "{save_name}"', icon="💾")
+            st.rerun()
+
+        can_delete = st.session_state.selected_position != "— New position —"
+        if del_col.button("🗑 Delete", use_container_width=True, disabled=not can_delete):
+            updated = delete(st.session_state.saved_positions, st.session_state.selected_position)
+            save_positions(updated)
+            st.session_state.saved_positions = updated
+            st.session_state.selected_position = "— New position —"
+            st.rerun()
+
     st.divider()
 
     # --- Start / Stop ---
