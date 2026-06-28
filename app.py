@@ -11,7 +11,7 @@ import time
 import pandas as pd
 import streamlit as st
 
-from stocker.config_manager import AppConfig, AlpacaConfig, load_config, save_config
+from stocker.config_manager import load_config
 from stocker.data_fetcher import BadTickerError, DataFetcher, normalize_crypto_ticker
 from stocker.positions_manager import add_or_update, delete, load_positions, save_positions
 from stocker.profit_calculator import compute_metrics
@@ -70,25 +70,20 @@ _DEFAULTS: dict = {
     # saved positions
     "saved_positions": [],
     "selected_position": "— New position —",
-    # Alpaca API keys
-    "alpaca_key": "",
-    "alpaca_secret": "",
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
-# Load saved positions and API keys from disk once per session
+# Load saved positions once per session
 if "positions_loaded" not in st.session_state:
     st.session_state.saved_positions = load_positions()
     st.session_state.positions_loaded = True
 
-if "keys_loaded" not in st.session_state:
-    # Environment variables take priority, then config file
-    _cfg = load_config()
-    st.session_state.alpaca_key    = os.environ.get("ALPACA_API_KEY",    _cfg.alpaca.api_key)
-    st.session_state.alpaca_secret = os.environ.get("ALPACA_API_SECRET", _cfg.alpaca.api_secret)
-    st.session_state.keys_loaded   = True
+# Load API keys from environment variables (set on the server — never shown to users)
+# Streamlit Cloud: set these in App Settings → Secrets
+_ALPACA_KEY    = os.environ.get("ALPACA_API_KEY",    "")
+_ALPACA_SECRET = os.environ.get("ALPACA_API_SECRET", "")
 
 
 
@@ -267,45 +262,6 @@ with st.sidebar:
 
     st.divider()
 
-    # --- Alpaca API keys (stocks only — crypto needs no key) ---
-    keys_set = bool(st.session_state.alpaca_key and st.session_state.alpaca_secret)
-    with st.expander(
-        "🔑 Alpaca API Keys" + (" ✓" if keys_set else " — required for stocks"),
-        expanded=not keys_set and not is_crypto(),
-    ):
-        st.caption(
-            "Free keys from [alpaca.markets](https://alpaca.markets) — "
-            "paper trading account works fine."
-        )
-        api_key = st.text_input(
-            "API Key ID",
-            value=st.session_state.alpaca_key,
-            type="password",
-            disabled=locked,
-            placeholder="Paste your Alpaca API Key ID",
-        )
-        api_secret = st.text_input(
-            "API Secret Key",
-            value=st.session_state.alpaca_secret,
-            type="password",
-            disabled=locked,
-            placeholder="Paste your Alpaca Secret Key",
-        )
-        if st.button("💾 Save keys", disabled=not (api_key and api_secret)):
-            st.session_state.alpaca_key    = api_key
-            st.session_state.alpaca_secret = api_secret
-            cfg = load_config()
-            cfg.alpaca.api_key    = api_key
-            cfg.alpaca.api_secret = api_secret
-            save_config(cfg)
-            st.toast("API keys saved!", icon="🔑")
-            st.rerun()
-
-        st.session_state.alpaca_key    = api_key
-        st.session_state.alpaca_secret = api_secret
-
-    st.divider()
-
     # --- Save / Delete ---
     if not locked:
         unit = "coins" if is_crypto() else "shares"
@@ -355,14 +311,17 @@ with st.sidebar:
         )
         if start_clicked:
             st.session_state.error = None
+            if not is_crypto() and not (_ALPACA_KEY and _ALPACA_SECRET):
+                st.session_state.error = "Stock data is unavailable right now. Try crypto mode instead."
+                st.rerun()
             mode_key = "crypto" if is_crypto() else "stock"
             with st.spinner(f"Connecting to {ticker}…"):
                 try:
                     fetcher = DataFetcher(
                         ticker,
                         mode="crypto" if is_crypto() else "stock",
-                        api_key=st.session_state.alpaca_key,
-                        api_secret=st.session_state.alpaca_secret,
+                        api_key=_ALPACA_KEY,
+                        api_secret=_ALPACA_SECRET,
                     )
                     scenarios = generate_scenarios(
                         total_shares=shares,
