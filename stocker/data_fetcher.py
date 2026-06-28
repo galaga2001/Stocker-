@@ -107,13 +107,7 @@ class DataFetcher:
     # ------------------------------------------------------------------
 
     def _build_client(self):
-        if self.mode == "crypto":
-            from alpaca.data.historical import CryptoHistoricalDataClient
-            # Crypto data is free and requires no auth on Alpaca
-            return CryptoHistoricalDataClient()
-        else:
-            from alpaca.data.historical import StockHistoricalDataClient
-            return StockHistoricalDataClient(self._api_key, self._api_secret)
+        pass  # clients are created fresh on each fetch to avoid stale cached data
 
     def _validate(self) -> None:
         try:
@@ -144,19 +138,23 @@ class DataFetcher:
         return self._fetch_stock()
 
     def _fetch_stock(self) -> float:
+        from alpaca.data.historical import StockHistoricalDataClient
         from alpaca.data.requests import StockLatestTradeRequest
+        client = StockHistoricalDataClient(self._api_key, self._api_secret)
         req    = StockLatestTradeRequest(symbol_or_symbols=self.ticker)
-        trades = self._client.get_stock_latest_trade(req)
+        trades = client.get_stock_latest_trade(req)
         trade  = trades.get(self.ticker)
         if not trade or not trade.price:
             raise RuntimeError(f"No trade data returned for {self.ticker}")
         return float(trade.price)
 
     def _fetch_crypto(self) -> float:
+        from alpaca.data.historical import CryptoHistoricalDataClient
         from alpaca.data.requests import CryptoLatestTradeRequest
+        client = CryptoHistoricalDataClient()
         symbol = _alpaca_crypto_symbol(self.ticker)
         req    = CryptoLatestTradeRequest(symbol_or_symbols=symbol)
-        trades = self._client.get_crypto_latest_trade(req)
+        trades = client.get_crypto_latest_trade(req)
         trade  = trades.get(symbol)
         if not trade or not trade.price:
             raise RuntimeError(f"No trade data returned for {symbol}")
