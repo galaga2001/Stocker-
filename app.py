@@ -12,7 +12,7 @@ import pandas as pd
 import streamlit as st
 
 from stocker.config_manager import load_config
-from stocker.data_fetcher import BadTickerError, DataFetcher, normalize_crypto_ticker
+from stocker.data_fetcher import BadTickerError, DataFetcher, normalize_crypto_ticker, SUPPORTED_CRYPTO
 from stocker.positions_manager import add_or_update, delete, load_positions, save_positions
 from stocker.profit_calculator import compute_metrics
 from stocker.scenario_generator import generate_scenarios, update_trigger_status
@@ -211,6 +211,7 @@ with st.sidebar:
             help="Type the coin symbol — USD is added automatically",
         ).strip().upper()
         ticker = normalize_crypto_ticker(raw_ticker) if raw_ticker else ""
+        st.caption("Supported: " + ", ".join(SUPPORTED_CRYPTO))
 
         shares = st.number_input(
             "Amount Held (coins)",
@@ -313,6 +314,12 @@ with st.sidebar:
             st.session_state.error = None
             if not is_crypto() and not (_ALPACA_KEY and _ALPACA_SECRET):
                 st.session_state.error = "Stock data is unavailable right now. Try crypto mode instead."
+                st.rerun()
+            base = ticker.split("-")[0].split("/")[0]
+            if is_crypto() and base not in SUPPORTED_CRYPTO:
+                st.session_state.error = (
+                    f"'{base}' is not supported. Supported coins: {', '.join(SUPPORTED_CRYPTO)}"
+                )
                 st.rerun()
             mode_key = "crypto" if is_crypto() else "stock"
             with st.spinner(f"Connecting to {ticker}…"):

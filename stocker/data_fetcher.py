@@ -13,6 +13,13 @@ _MARKET_OPEN  = dtime(9, 30)
 _MARKET_CLOSE = dtime(16, 0)
 _ET = ZoneInfo("America/New_York")
 
+# Coins supported by Alpaca's crypto feed
+SUPPORTED_CRYPTO = [
+    "BTC", "ETH", "SOL", "DOGE", "SHIB", "AVAX", "LTC", "BCH",
+    "LINK", "UNI", "AAVE", "DOT", "MATIC", "ALGO", "BAT",
+    "CRV", "SUSHI", "XTZ", "USDC", "USDT",
+]
+
 
 @dataclass
 class PriceSnapshot:
